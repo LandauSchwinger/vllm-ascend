@@ -362,6 +362,22 @@ class NanoGLM(nn.Module):
         return idx
 
 
+def pick_device():
+    """cuda, npu (Ascend) or cpu.
+
+    torch_npu must be imported before torch.npu exists: importing it is what
+    registers the NPU backend, the "npu" device string and its autocast type.
+    """
+    try:
+        import torch_npu  # noqa: F401
+
+        if torch.npu.is_available():
+            return "npu"
+    except ImportError:
+        pass
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def load(path, device="cpu"):
     """Returns (model, dataset) exactly as they were at training time."""
     from data import Needles

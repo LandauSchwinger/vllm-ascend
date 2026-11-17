@@ -32,7 +32,7 @@ pip install torch matplotlib
 ```
 
 ```bash
-python train.py --preset a100
+python train.py --preset single_card
 ```
 
 ```bash
@@ -53,7 +53,7 @@ mentioned anywhere in this branch, so everything below about "GLM-5.x" is
 checked against the GLM-5.2 code paths here, and the headline numbers come
 from third-party model cards, not from a Z.ai paper.
 
-| | GLM-5.3 (as reported) | nanoGLM `a100` preset | nanoGLM `tiny` preset |
+| | GLM-5.3 (as reported) | nanoGLM `single_card` preset | nanoGLM `tiny` preset |
 |---|---|---|---|
 | parameters | ~750B total, ~40B used per token | 25M | 0.7M |
 | layers | 78, the first 3 with a dense FFN | 6, the first 1 dense | 4, the first 1 dense |
@@ -684,11 +684,48 @@ Everything in this directory was executed, on a 4-core CPU with no GPU, with
 `--preset tiny` (0.7M parameters, context 128, 4,000 steps, about 12 minutes).
 All numbers above are from that run.
 
-`--preset a100` (25M parameters, context 512, batch 64, 12,000 steps) has
-**not** been run: there was no GPU where this was written. The code path is
-the same, plus bf16 autocast on CUDA. Treat its settings as a first guess. My
-estimate is on the order of an hour on an A100; if memory runs out (training
-keeps full attention matrices for the indexer loss) lower the batch size.
+`--preset single_card` (25M parameters, context 512, batch 64, 12,000 steps)
+has **not** been run: the machine this was written on had no accelerator of
+any kind. The code path is the same, plus bf16 autocast. Treat its settings as
+a first guess, on the order of an hour.
+
+Its memory I did measure, by running training steps on CPU: **about 0.27 GB
+per unit of batch size**, so batch 64 needs roughly 17 GB. That fits an Atlas
+A2 (64 GB) or A3 (128 GB) card with room to spare. It is dominated by the
+full attention matrices, which the indexer loss forces us to keep for the
+backward pass; halve the batch if you are tighter than that.
+
+## Running it on an Ascend NPU
+
+This is a plain PyTorch model, so it does not need vLLM, CANN custom kernels
+or anything else from the surrounding repository. It needs `torch` and
+`torch_npu`. `pick_device()` in `nanoglm.py` selects `npu` when `torch_npu`
+imports and a device is visible, else `cuda`, else `cpu`, and training uses
+bf16 autocast on whichever it finds.
+
+**Untested.** No Ascend device was available where this was written, so the
+NPU path is reasoned, not run. Two things to check first:
+
+- **`stable_topk`** (`nanoglm.py`) relies on `torch.sort(..., stable=True)`.
+  If a backend quietly ignores `stable`, prefill and decode can pick different
+  tokens on a tie and the equivalence check in `01_kv_cache.py` fails. Run
+  that script first: it is the canary, and it is exactly the bug described in
+  part 3.
+- **The int32 matmul** in `04_quantization.py` is pinned to CPU on purpose. A
+  generic `int32 @ int32` is a CPU-only operation in PyTorch; accelerators
+  reach int8 matmul through a dedicated kernel instead, which on Ascend is
+  `torch_npu.npu_quant_matmul`. That one line demonstrates the semantics, not
+  the hardware path.
+
+The rest is ordinary dense arithmetic (`einsum`, `sort`, `index_add`,
+`bincount`, `multinomial`). The MoE loop's `counts.tolist()` forces a device
+sync per layer per step, which `AGENTS.md` warns about for exactly this
+reason; it is slow on an accelerator but correct, and the comment in part 2
+exists to make that visible.
+
+If you want the real Ascend kernels rather than this teaching version, the
+model to deploy is GLM-5.2 or GLM-5.3-Flash through vLLM-Ascend proper; see
+`docs/source/tutorials/models/`.
 
 One thing to look for. The tiny model's query accuracy stops near 81%.
 Breaking the errors down shows why:

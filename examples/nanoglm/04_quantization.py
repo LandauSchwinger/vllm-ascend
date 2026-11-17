@@ -31,11 +31,15 @@ W_q, w_scale = weight_quant(W)
 x_q, x_scale = dynamic_quant(x)
 print("one row of W, float :", [f"{v:+.4f}" for v in W[0, :6].tolist()])
 print("the same row, int8  :", W_q[0, :6].tolist(), f"x scale {w_scale[0].item():.6f}")
-acc_int = x_q.to(torch.int32) @ W_q.to(torch.int32).T  # the real thing: integers in, integers out
+# The real thing: integers in, integers out. Kept on CPU on purpose: a generic
+# int32 matmul is a CPU-only operation in PyTorch. An accelerator does int8
+# matmul through a dedicated quantized kernel instead (on Ascend that is
+# torch_npu.npu_quant_matmul), never through the `@` operator.
+acc_int = x_q.cpu().to(torch.int32) @ W_q.cpu().to(torch.int32).T
 acc_flt = x_q @ W_q.float().T  # what QLinear does
 print(f"int32 accumulator: max |value| = {acc_int.abs().max().item()} (int32 holds 2147483647), "
-      f"float emulation identical: {bool((acc_int == acc_flt).all())}")  # fmt: skip
-y_w8a8 = acc_int * x_scale * w_scale
+      f"float emulation identical: {bool((acc_int == acc_flt.cpu()).all())}")  # fmt: skip
+y_w8a8 = acc_int.to(x_scale.device) * x_scale * w_scale
 y_w8 = x @ (W_q * w_scale[:, None]).T
 
 

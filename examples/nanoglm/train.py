@@ -1,8 +1,8 @@
 """
 Train nanoGLM on "needles in Shakespeare".
 
-    python train.py --preset tiny     # CPU / laptop
-    python train.py --preset a100     # one A100
+    python train.py --preset tiny          # CPU / laptop
+    python train.py --preset single_card   # one accelerator: an Ascend NPU, or a GPU
 
 Two stages, like the DSA recipe of DeepSeek-V3.2 that GLM-5.x inherits:
   1. dense warm-up : normal dense attention. On the side, each lightning
@@ -20,7 +20,7 @@ from dataclasses import asdict
 
 import torch
 from data import Needles
-from nanoglm import Config, NanoGLM, evaluate
+from nanoglm import Config, NanoGLM, evaluate, pick_device
 
 PRESETS = {
     "tiny": dict(
@@ -28,7 +28,7 @@ PRESETS = {
                  index_n_head=2, index_head_dim=32, index_topk=16, indexer_layers=(0, 2)),
         batch_size=32, steps=4000, lr=1e-3, gap=(6, 20),
     ),
-    "a100": dict(
+    "single_card": dict(
         cfg=dict(block_size=512, n_layer=6, n_head=6, n_embd=384, n_experts=8, expert_hidden=384,
                  index_n_head=4, index_head_dim=32, index_topk=48, indexer_layers=(0, 2, 4)),
         batch_size=64, steps=12000, lr=6e-4, gap=(15, 45),
@@ -47,7 +47,7 @@ args = parser.parse_args()
 preset = PRESETS[args.preset]
 steps = args.steps or preset["steps"]
 sparse_from = int(steps * (1 - args.sparse_frac))
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = pick_device()
 torch.manual_seed(args.seed)
 
 data = Needles(args.seed, preset["gap"])
@@ -94,7 +94,7 @@ for step in range(steps + 1):
     for group in opt.param_groups:
         group["lr"] = lr_at(step)
     x, y, _, _ = data.batch("train", preset["batch_size"], cfg.block_size, device)
-    with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=device == "cuda"):
+    with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=device != "cpu"):
         _, losses = model(x, y)
     # three losses: predict the next char, imitate the attention, keep experts busy
     loss = losses["lm"] + losses["index"] + 0.01 * losses["balance"]
